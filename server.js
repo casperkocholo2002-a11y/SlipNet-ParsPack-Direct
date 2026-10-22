@@ -11,8 +11,9 @@ const ORIGIN_CONNECT_HOST = String(process.env.ORIGIN_CONNECT_HOST || '').trim()
 const ORIGIN_PORT = Number(process.env.ORIGIN_PORT || 443);
 const ORIGIN_SERVERNAME = String(process.env.ORIGIN_SERVERNAME || '').trim();
 const ORIGIN_PATH = String(process.env.ORIGIN_PATH || '').trim();
+const ORIGIN_TLS_MODE = String(process.env.ORIGIN_TLS_MODE || 'public').trim();
 const ORIGIN_CA_PEM_B64 = String(process.env.ORIGIN_CA_PEM_B64 || '').trim();
-const BUILD = 'parspack-direct-v1.2';
+const BUILD = 'parspack-direct-v1.3';
 const MAX_WS = 1024 * 1024;
 
 function fail(message) {
@@ -30,14 +31,17 @@ if (!ORIGIN_CONNECT_HOST || ORIGIN_CONNECT_HOST.length < 3) fail('ORIGIN_CONNECT
 if (!Number.isInteger(ORIGIN_PORT) || ORIGIN_PORT < 1 || ORIGIN_PORT > 65535) fail('invalid ORIGIN_PORT');
 if (!ORIGIN_SERVERNAME || ORIGIN_SERVERNAME.length < 8) fail('ORIGIN_SERVERNAME is required');
 if (!validPath(ORIGIN_PATH)) fail('ORIGIN_PATH is required');
-if (!ORIGIN_CA_PEM_B64) fail('ORIGIN_CA_PEM_B64 is required');
-
-let ORIGIN_CA;
-try {
-  ORIGIN_CA = Buffer.from(ORIGIN_CA_PEM_B64, 'base64').toString('utf8');
-  if (!ORIGIN_CA.includes('BEGIN CERTIFICATE')) throw new Error('bad ca');
-} catch {
-  fail('ORIGIN_CA_PEM_B64 is invalid');
+let ORIGIN_CA = null;
+if (ORIGIN_TLS_MODE === 'pinned') {
+  if (!ORIGIN_CA_PEM_B64) fail('ORIGIN_CA_PEM_B64 is required in pinned mode');
+  try {
+    ORIGIN_CA = Buffer.from(ORIGIN_CA_PEM_B64, 'base64').toString('utf8');
+    if (!ORIGIN_CA.includes('BEGIN CERTIFICATE')) throw new Error('bad ca');
+  } catch {
+    fail('ORIGIN_CA_PEM_B64 is invalid');
+  }
+} else if (ORIGIN_TLS_MODE !== 'public') {
+  fail('ORIGIN_TLS_MODE must be public or pinned');
 }
 
 const server = http.createServer((req, res) => {
@@ -46,7 +50,7 @@ const server = http.createServer((req, res) => {
       ok: true,
       build: BUILD,
       relayConfigured: true,
-      originTlsPinned: true
+      originTlsMode: ORIGIN_TLS_MODE
     }));
     res.writeHead(200, {
       'content-type': 'application/json',
@@ -111,19 +115,20 @@ function openBackend() {
     ? ORIGIN_SERVERNAME
     : ORIGIN_SERVERNAME + ':' + ORIGIN_PORT;
 
-  return new WebSocket('wss://' + authority + ORIGIN_PATH, {
+  const wsOptions = {
     perMessageDeflate: false,
     handshakeTimeout: 15000,
     maxPayload: MAX_WS,
     servername: ORIGIN_SERVERNAME,
     rejectUnauthorized: true,
-    ca: ORIGIN_CA,
     lookup: (_hostname, options, callback) => {
       const family = net.isIP(ORIGIN_CONNECT_HOST);
       if (family) return callback(null, ORIGIN_CONNECT_HOST, family);
       dns.lookup(ORIGIN_CONNECT_HOST, { family: options && options.family ? options.family : 0 }, callback);
     }
-  });
+  };
+  if (ORIGIN_TLS_MODE === 'pinned') wsOptions.ca = ORIGIN_CA;
+  return new WebSocket('wss://' + authority + ORIGIN_PATH, wsOptions);
 }
 
 server.on('upgrade', (req, socket, head) => {
