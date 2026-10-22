@@ -10,7 +10,8 @@ const ORIGIN_CONNECT_HOST = String(process.env.ORIGIN_CONNECT_HOST || '').trim()
 const ORIGIN_PORT = Number(process.env.ORIGIN_PORT || 443);
 const ORIGIN_SERVERNAME = String(process.env.ORIGIN_SERVERNAME || '').trim();
 const ORIGIN_PATH = String(process.env.ORIGIN_PATH || '').trim();
-const BUILD = 'parspack-direct-v1';
+const ORIGIN_CA_PEM_B64 = String(process.env.ORIGIN_CA_PEM_B64 || '').trim();
+const BUILD = 'parspack-direct-v1.1';
 const MAX_WS = 1024 * 1024;
 
 function fail(message) {
@@ -24,17 +25,27 @@ function validPath(value) {
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) fail('invalid PORT');
 if (!validPath(PUBLIC_RELAY_PATH)) fail('PUBLIC_RELAY_PATH is required');
-if (!ORIGIN_CONNECT_HOST) fail('ORIGIN_CONNECT_HOST is required');
+if (!ORIGIN_CONNECT_HOST || net.isIP(ORIGIN_CONNECT_HOST) === 0) fail('ORIGIN_CONNECT_HOST must be an IP address');
 if (!Number.isInteger(ORIGIN_PORT) || ORIGIN_PORT < 1 || ORIGIN_PORT > 65535) fail('invalid ORIGIN_PORT');
-if (!ORIGIN_SERVERNAME) fail('ORIGIN_SERVERNAME is required');
+if (!ORIGIN_SERVERNAME || ORIGIN_SERVERNAME.length < 8) fail('ORIGIN_SERVERNAME is required');
 if (!validPath(ORIGIN_PATH)) fail('ORIGIN_PATH is required');
+if (!ORIGIN_CA_PEM_B64) fail('ORIGIN_CA_PEM_B64 is required');
+
+let ORIGIN_CA;
+try {
+  ORIGIN_CA = Buffer.from(ORIGIN_CA_PEM_B64, 'base64').toString('utf8');
+  if (!ORIGIN_CA.includes('BEGIN CERTIFICATE')) throw new Error('bad ca');
+} catch {
+  fail('ORIGIN_CA_PEM_B64 is invalid');
+}
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     const body = Buffer.from(JSON.stringify({
       ok: true,
       build: BUILD,
-      relayConfigured: true
+      relayConfigured: true,
+      originTlsPinned: true
     }));
     res.writeHead(200, {
       'content-type': 'application/json',
@@ -105,8 +116,10 @@ function openBackend() {
     maxPayload: MAX_WS,
     servername: ORIGIN_SERVERNAME,
     rejectUnauthorized: true,
+    ca: ORIGIN_CA,
     lookup: (_hostname, _options, callback) => {
-      callback(null, ORIGIN_CONNECT_HOST, net.isIP(ORIGIN_CONNECT_HOST) || 4);
+      const family = net.isIP(ORIGIN_CONNECT_HOST);
+      callback(null, ORIGIN_CONNECT_HOST, family);
     }
   });
 }
