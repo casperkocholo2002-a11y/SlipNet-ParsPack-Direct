@@ -13,7 +13,7 @@ const ORIGIN_SERVERNAME = String(process.env.ORIGIN_SERVERNAME || '').trim();
 const ORIGIN_PATH = String(process.env.ORIGIN_PATH || '').trim();
 const ORIGIN_TLS_MODE = String(process.env.ORIGIN_TLS_MODE || 'public').trim();
 const ORIGIN_CA_PEM_B64 = String(process.env.ORIGIN_CA_PEM_B64 || '').trim();
-const BUILD = 'parspack-direct-v1.3';
+const BUILD = 'parspack-direct-v1.4';
 const MAX_WS = 1024 * 1024;
 
 function fail(message) {
@@ -120,13 +120,17 @@ function openBackend() {
     handshakeTimeout: 15000,
     maxPayload: MAX_WS,
     servername: ORIGIN_SERVERNAME,
-    rejectUnauthorized: true,
-    lookup: (_hostname, options, callback) => {
+    rejectUnauthorized: true
+  };
+
+  if (ORIGIN_CONNECT_HOST !== ORIGIN_SERVERNAME) {
+    wsOptions.lookup = (_hostname, options, callback) => {
       const family = net.isIP(ORIGIN_CONNECT_HOST);
       if (family) return callback(null, ORIGIN_CONNECT_HOST, family);
       dns.lookup(ORIGIN_CONNECT_HOST, { family: options && options.family ? options.family : 0 }, callback);
-    }
-  };
+    };
+  }
+
   if (ORIGIN_TLS_MODE === 'pinned') wsOptions.ca = ORIGIN_CA;
   return new WebSocket('wss://' + authority + ORIGIN_PATH, wsOptions);
 }
