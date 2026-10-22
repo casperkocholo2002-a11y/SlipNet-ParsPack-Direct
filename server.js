@@ -2,6 +2,7 @@
 
 const http = require('http');
 const net = require('net');
+const dns = require('dns');
 const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -11,7 +12,7 @@ const ORIGIN_PORT = Number(process.env.ORIGIN_PORT || 443);
 const ORIGIN_SERVERNAME = String(process.env.ORIGIN_SERVERNAME || '').trim();
 const ORIGIN_PATH = String(process.env.ORIGIN_PATH || '').trim();
 const ORIGIN_CA_PEM_B64 = String(process.env.ORIGIN_CA_PEM_B64 || '').trim();
-const BUILD = 'parspack-direct-v1.1';
+const BUILD = 'parspack-direct-v1.2';
 const MAX_WS = 1024 * 1024;
 
 function fail(message) {
@@ -25,7 +26,7 @@ function validPath(value) {
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) fail('invalid PORT');
 if (!validPath(PUBLIC_RELAY_PATH)) fail('PUBLIC_RELAY_PATH is required');
-if (!ORIGIN_CONNECT_HOST || net.isIP(ORIGIN_CONNECT_HOST) === 0) fail('ORIGIN_CONNECT_HOST must be an IP address');
+if (!ORIGIN_CONNECT_HOST || ORIGIN_CONNECT_HOST.length < 3) fail('ORIGIN_CONNECT_HOST is required');
 if (!Number.isInteger(ORIGIN_PORT) || ORIGIN_PORT < 1 || ORIGIN_PORT > 65535) fail('invalid ORIGIN_PORT');
 if (!ORIGIN_SERVERNAME || ORIGIN_SERVERNAME.length < 8) fail('ORIGIN_SERVERNAME is required');
 if (!validPath(ORIGIN_PATH)) fail('ORIGIN_PATH is required');
@@ -117,9 +118,10 @@ function openBackend() {
     servername: ORIGIN_SERVERNAME,
     rejectUnauthorized: true,
     ca: ORIGIN_CA,
-    lookup: (_hostname, _options, callback) => {
+    lookup: (_hostname, options, callback) => {
       const family = net.isIP(ORIGIN_CONNECT_HOST);
-      callback(null, ORIGIN_CONNECT_HOST, family);
+      if (family) return callback(null, ORIGIN_CONNECT_HOST, family);
+      dns.lookup(ORIGIN_CONNECT_HOST, { family: options && options.family ? options.family : 0 }, callback);
     }
   });
 }
