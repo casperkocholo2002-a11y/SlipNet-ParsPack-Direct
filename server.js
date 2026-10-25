@@ -1,19 +1,21 @@
 'use strict';
 
 const http = require('http');
-const net = require('net');
-const dns = require('dns');
 const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_RELAY_PATH = String(process.env.PUBLIC_RELAY_PATH || '').trim();
-const ORIGIN_CONNECT_HOST = String(process.env.ORIGIN_CONNECT_HOST || '').trim();
-const ORIGIN_PORT = Number(process.env.ORIGIN_PORT || 443);
-const ORIGIN_SERVERNAME = String(process.env.ORIGIN_SERVERNAME || '').trim();
-const ORIGIN_PATH = String(process.env.ORIGIN_PATH || '').trim();
-const ORIGIN_TLS_MODE = String(process.env.ORIGIN_TLS_MODE || 'public').trim();
-const ORIGIN_CA_PEM_B64 = String(process.env.ORIGIN_CA_PEM_B64 || '').trim();
-const BUILD = 'parspack-direct-v1.4';
+const PUBLIC_RELAY_PATH = String(
+  process.env.PUBLIC_RELAY_PATH ||
+  '/p/92943149c56048dda2b2123e591f9e7de9d79ae7d0d086db'
+).trim();
+
+const ECH_RELAY_HOST = String(process.env.ECH_RELAY_HOST || '').trim();
+const ECH_RELAY_PATH = String(
+  process.env.ECH_RELAY_PATH ||
+  '/p/92943149c56048dda2b2123e591f9e7de9d79ae7d0d086db'
+).trim();
+
+const BUILD = 'parspack-route1-ech-ingress-v1';
 const MAX_WS = 1024 * 1024;
 
 function fail(message) {
@@ -22,35 +24,26 @@ function fail(message) {
 }
 
 function validPath(value) {
-  return value.startsWith('/') && value.length > 8 && !value.includes('?') && !value.includes('#');
+  return value.startsWith('/') &&
+    value.length > 8 &&
+    !value.includes('?') &&
+    !value.includes('#');
 }
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) fail('invalid PORT');
 if (!validPath(PUBLIC_RELAY_PATH)) fail('PUBLIC_RELAY_PATH is required');
-if (!ORIGIN_CONNECT_HOST || ORIGIN_CONNECT_HOST.length < 3) fail('ORIGIN_CONNECT_HOST is required');
-if (!Number.isInteger(ORIGIN_PORT) || ORIGIN_PORT < 1 || ORIGIN_PORT > 65535) fail('invalid ORIGIN_PORT');
-if (!ORIGIN_SERVERNAME || ORIGIN_SERVERNAME.length < 8) fail('ORIGIN_SERVERNAME is required');
-if (!validPath(ORIGIN_PATH)) fail('ORIGIN_PATH is required');
-let ORIGIN_CA = null;
-if (ORIGIN_TLS_MODE === 'pinned') {
-  if (!ORIGIN_CA_PEM_B64) fail('ORIGIN_CA_PEM_B64 is required in pinned mode');
-  try {
-    ORIGIN_CA = Buffer.from(ORIGIN_CA_PEM_B64, 'base64').toString('utf8');
-    if (!ORIGIN_CA.includes('BEGIN CERTIFICATE')) throw new Error('bad ca');
-  } catch {
-    fail('ORIGIN_CA_PEM_B64 is invalid');
-  }
-} else if (ORIGIN_TLS_MODE !== 'public') {
-  fail('ORIGIN_TLS_MODE must be public or pinned');
+if (!ECH_RELAY_HOST || ECH_RELAY_HOST.includes('/') || ECH_RELAY_HOST.includes('://')) {
+  fail('ECH_RELAY_HOST is required as a bare hostname');
 }
+if (!validPath(ECH_RELAY_PATH)) fail('ECH_RELAY_PATH is required');
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     const body = Buffer.from(JSON.stringify({
       ok: true,
       build: BUILD,
-      relayConfigured: true,
-      originTlsMode: ORIGIN_TLS_MODE
+      mode: 'stable-ingress-to-ech-relay',
+      ech_required: true
     }));
     res.writeHead(200, {
       'content-type': 'application/json',
@@ -91,50 +84,6 @@ function reject(socket, status = '404 Not Found') {
   }
 }
 
-function bridge(clientStream, backendStream, closeAll) {
-  let closed = false;
-  const closeOnce = () => {
-    if (closed) return;
-    closed = true;
-    closeAll();
-  };
-
-  clientStream.on('error', closeOnce);
-  backendStream.on('error', closeOnce);
-  clientStream.once('close', closeOnce);
-  backendStream.once('close', () => {
-    if (!backendStream.readableEnded) closeOnce();
-  });
-
-  clientStream.pipe(backendStream);
-  backendStream.pipe(clientStream);
-}
-
-function openBackend() {
-  const authority = ORIGIN_PORT === 443
-    ? ORIGIN_SERVERNAME
-    : ORIGIN_SERVERNAME + ':' + ORIGIN_PORT;
-
-  const wsOptions = {
-    perMessageDeflate: false,
-    handshakeTimeout: 15000,
-    maxPayload: MAX_WS,
-    servername: ORIGIN_SERVERNAME,
-    rejectUnauthorized: true
-  };
-
-  if (ORIGIN_CONNECT_HOST !== ORIGIN_SERVERNAME) {
-    wsOptions.lookup = (_hostname, options, callback) => {
-      const family = net.isIP(ORIGIN_CONNECT_HOST);
-      if (family) return callback(null, ORIGIN_CONNECT_HOST, family);
-      dns.lookup(ORIGIN_CONNECT_HOST, { family: options && options.family ? options.family : 0 }, callback);
-    };
-  }
-
-  if (ORIGIN_TLS_MODE === 'pinned') wsOptions.ca = ORIGIN_CA;
-  return new WebSocket('wss://' + authority + ORIGIN_PATH, wsOptions);
-}
-
 server.on('upgrade', (req, socket, head) => {
   let pathname;
   try {
@@ -145,24 +94,32 @@ server.on('upgrade', (req, socket, head) => {
 
   if (pathname !== PUBLIC_RELAY_PATH) return reject(socket);
 
+  const upstream = new WebSocket(
+    'wss://' + ECH_RELAY_HOST + ECH_RELAY_PATH,
+    {
+      perMessageDeflate: false,
+      handshakeTimeout: 15000,
+      maxPayload: MAX_WS
+    }
+  );
+
   let client;
   let clientStream;
-  let backendStream;
+  let upstreamStream;
   let closed = false;
-  const backend = openBackend();
 
   const closeAll = () => {
     if (closed) return;
     closed = true;
     try { clientStream && clientStream.destroy(); } catch {}
-    try { backendStream && backendStream.destroy(); } catch {}
+    try { upstreamStream && upstreamStream.destroy(); } catch {}
     try { client && client.terminate(); } catch {}
-    try { backend.terminate(); } catch {}
+    try { upstream.terminate(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  backend.once('open', () => {
-    try { tune(backend._socket); } catch {}
+  upstream.once('open', () => {
+    try { tune(upstream._socket); } catch {}
 
     try {
       relayWss.handleUpgrade(req, socket, head, (ws) => {
@@ -173,19 +130,26 @@ server.on('upgrade', (req, socket, head) => {
           encoding: null,
           highWaterMark: 1024 * 1024
         });
-        backendStream = createWebSocketStream(backend, {
+
+        upstreamStream = createWebSocketStream(upstream, {
           encoding: null,
           highWaterMark: 1024 * 1024
         });
 
-        bridge(clientStream, backendStream, closeAll);
+        clientStream.on('error', closeAll);
+        upstreamStream.on('error', closeAll);
+        clientStream.once('close', closeAll);
+        upstreamStream.once('close', closeAll);
+
+        clientStream.pipe(upstreamStream);
+        upstreamStream.pipe(clientStream);
       });
     } catch {
       closeAll();
     }
   });
 
-  backend.once('error', () => {
+  upstream.once('error', () => {
     if (!client) reject(socket, '502 Bad Gateway');
     closeAll();
   });
